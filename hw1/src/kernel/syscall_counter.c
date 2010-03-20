@@ -14,7 +14,7 @@ asmlinkage int sys_get_num_syscalls(int pid)
     }
     if(pid == 1)
     {
-	return p->p_pptr->syscall_counter;
+	return current->p_pptr->syscall_counter;
     }
     return (find_task_by_pid(pid))->syscall_counter;
 }
