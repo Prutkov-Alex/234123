@@ -203,6 +203,7 @@ ENTRY(system_call)
 	jae badsys
 	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
+	call update_syscall_counter	# update syscall counter
 ENTRY(ret_from_sys_call)
 	cli				# need_resched and signals atomic test
 	cmpl $0,need_resched(%ebx)
