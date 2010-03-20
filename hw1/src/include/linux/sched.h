@@ -451,6 +451,9 @@ struct task_struct {
 
 /* journalling filesystem info */
 	void *journal_info;
+
+/* syscall counter */
+	long syscall_counter;
 };
 
 /*
