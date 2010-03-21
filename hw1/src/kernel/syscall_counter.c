@@ -8,6 +8,11 @@ asmlinkage void update_syscall_counter()
 
 asmlinkage int sys_get_num_syscalls(int pid)
 {
+    task_t *task;
+    if(pid < 0)
+    {
+	return -EINVAL;
+    }
     if(pid == 0)
     {
 	return current->syscall_counter;
@@ -16,12 +21,19 @@ asmlinkage int sys_get_num_syscalls(int pid)
     {
 	return current->p_pptr->syscall_counter;
     }
-    return (find_task_by_pid(pid))->syscall_counter;
+    task = find_task_by_pid(pid);
+    if(task) {
+	return task->syscall_counter;
+    }
+    return -ESRCH;
 }
 
 asmlinkage int sys_get_max_proc_syscalls(int *syscall_num)
 {
-    /* TODO: We have first to check that syscall_num is a valid pointer */
+    if(!access_ok(VERIFY_WRITE,syscall_num,sizeof(int)))
+    {
+	return -EFAULT;
+    }
     long max_syscall_num  = current->syscall_counter;
     pid_t max_syscall_pid = current->pid;
     task_t *task = current->next_task;
