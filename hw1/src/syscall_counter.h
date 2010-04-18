@@ -1,3 +1,5 @@
+#include <errno.h>
+
 int get_num_syscalls(int pid)
 {
     unsigned int res;

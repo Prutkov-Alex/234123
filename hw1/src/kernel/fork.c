@@ -612,6 +612,7 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 		goto fork_out;
 
 	*p = *current;
+	p->syscall_counter += 1; /* Increment child's syscall_counter for fork() */
 	p->tux_info = NULL;
 	p->cpus_allowed_mask &= p->cpus_allowed;
 
