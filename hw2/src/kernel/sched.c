@@ -1305,7 +1305,16 @@ asmlinkage long sys_sched_getparam(pid_t pid, struct sched_param *param)
 	retval = -ESRCH;
 	if (!p)
 		goto out_unlock;
-	lp.sched_priority = p->rt_priority;
+	if(p->policy != SCHED_PROD)
+	  {
+	    lp.sched_priority = p->rt_priority;
+	  }
+	else
+	  {
+	    lp.prod_params.is_critical = p->is_critical;
+	    lp.prod_params.process_expected_time = p->process_expected_time;
+	    lp.prod_params.machine_cost = p->machine_cost;
+	  }
 	read_unlock(&tasklist_lock);
 
 	/*

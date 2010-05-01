@@ -124,7 +124,7 @@ extern unsigned long nr_uninterruptible(void);
 /*
  * Production policy (not)critical flags
  */
-#define PROD_NOTCRITICAL	0
+#define PROD_NON_CRITICAL	0
 #define PROD_CRITICAL		1
 
 /*
@@ -473,13 +473,12 @@ struct task_struct {
 
 /* journalling filesystem info */
 	void *journal_info;
-
-/* new scheduler variables */
-	 int critical;
-	 int expensive;
-	 int expected_time;
-	 int consumed_time;
-	 int task_cost;
+/* Production scheduler variables */
+	int is_critical;
+	int process_expected_time;
+	int is_expenSsive;
+	int process_consumed_time;
+	int machine_cost;
 };
 
 /*
