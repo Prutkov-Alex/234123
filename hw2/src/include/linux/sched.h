@@ -119,9 +119,31 @@ extern unsigned long nr_uninterruptible(void);
 #define SCHED_OTHER		0
 #define SCHED_FIFO		1
 #define SCHED_RR		2
+#define SCHED_PROD              3
+
+/*
+ * Production policy (not)critical flags
+ */
+#define PROD_NOTCRITICAL	0
+#define PROD_CRITICAL		1
+
+/*
+ * Production policy (not)critical flags
+ */
+#define PROD_ONTIME 		0
+#define PROD_EXPIRED		1
+
+struct prod_sched_param {
+	int is_critical;
+	int process_expected_time;
+	int machine_cost;
+};
 
 struct sched_param {
-	int sched_priority;
+	union {
+		int sched_priority;
+		struct prod_sched_param prod_params;
+	}
 };
 
 struct completion;
@@ -451,6 +473,13 @@ struct task_struct {
 
 /* journalling filesystem info */
 	void *journal_info;
+
+/* new scheduler variables */
+	 int critical;
+	 int expensive;
+	 int expected_time;
+	 int consumed_time;
+	 int task_cost;
 };
 
 /*

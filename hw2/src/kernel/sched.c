@@ -119,6 +119,7 @@
 #define BITMAP_SIZE ((((MAX_PRIO+1+7)/8)+sizeof(long)-1)/sizeof(long))
 
 typedef struct runqueue runqueue_t;
+typedef struct prod_runqueue prod_runqueue_t;
 
 struct prio_array {
 	int nr_active;
@@ -144,13 +145,23 @@ struct runqueue {
 	list_t migration_queue;
 } ____cacheline_aligned;
 
+/* This is runqueue for SCHED_PROD scheduler */
+struct prod_runqueue {
+    list_t queue[3];		/* One queue per on-time, expensive and expired tasks */
+    unsigned long nr_running;
+};
+
+static struct prod_runqueue prod_runqueues[2] __cacheline_aligned;
 static struct runqueue runqueues[NR_CPUS] __cacheline_aligned;
 
 #define cpu_rq(cpu)		(runqueues + (cpu))
 #define this_rq()		cpu_rq(smp_processor_id())
 #define task_rq(p)		cpu_rq((p)->cpu)
 #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
-#define rt_task(p)		((p)->prio < MAX_RT_PRIO)
+#define rt_task(p)		((p)->prio < MAX_RT_PRIO && (p)->policy != SCHED_PROD)
+
+#define critical_rq()           (prod_runqueues[0])
+#define non_critical_rq()       (prod_runqueues[1])
 
 /*
  * Default context-switch locking:
@@ -739,7 +750,7 @@ void scheduler_tick(int user_tick, int system)
 	kstat.per_cpu_system[cpu] += system;
 
 	/* Task might have expired already, but not scheduled off yet */
-	if (p->array != rq->active) {
+	if (p->array != rq->active && p->policy != SCHED_PROD) {
 		set_tsk_need_resched(p);
 		return;
 	}
@@ -771,6 +782,10 @@ void scheduler_tick(int user_tick, int system)
 	if (p->sleep_avg)
 		p->sleep_avg--;
 	if (!--p->time_slice) {
+	    if(p->policy == SCHED_PROD) {
+		set_tsk_need_resched(p);
+		/* Update here production runqueue. Find new place for p */
+	    } else {
 		dequeue_task(p, rq->active);
 		set_tsk_need_resched(p);
 		p->prio = effective_prio(p);
@@ -783,6 +798,7 @@ void scheduler_tick(int user_tick, int system)
 			enqueue_task(p, rq->expired);
 		} else
 			enqueue_task(p, rq->active);
+	    }		
 	}
 out:
 #if CONFIG_SMP
@@ -801,9 +817,13 @@ asmlinkage void schedule(void)
 {
 	task_t *prev, *next;
 	runqueue_t *rq;
+	prod_runqueue_t *prod_rq;
 	prio_array_t *array;
 	list_t *queue;
 	int idx;
+	unsigned long prod_nr_running;
+	unsigned long prod_critical_nr_running;
+	unsigned long prod_non_critical_nr_running;
 
 	if (unlikely(in_interrupt()))
 		BUG();
@@ -811,6 +831,11 @@ asmlinkage void schedule(void)
 need_resched:
 	prev = current;
 	rq = this_rq();
+	prod_rq = critical_rq();
+	prod_critical_nr_running = prod_rq->nr_running;
+	prod_rq = non_critical_rq();
+	prod_non_critical_nr_running = prod_rq->nr_running;
+	prod_nr_running = prod_critical_nr_running + prod_non_critical_nr_running;
 
 	release_kernel_lock(prev, smp_processor_id());
 	prepare_arch_schedule(prev);
@@ -831,7 +856,7 @@ need_resched:
 #if CONFIG_SMP
 pick_next_task:
 #endif
-	if (unlikely(!rq->nr_running)) {
+	if (unlikely(!rq->nr_running && !prod_nr_running)) {
 #if CONFIG_SMP
 		load_balance(rq, 1);
 		if (rq->nr_running)
@@ -854,9 +879,21 @@ pick_next_task:
 	}
 
 	idx = sched_find_first_bit(array->bitmap);
-	queue = array->queue + idx;
-	next = list_entry(queue->next, task_t, run_list);
-
+	/* If there are real time priority processes schedule them */
+	if(idx < MAX_RT_PRIO) {
+	    queue = array->queue + idx;
+	    next = list_entry(queue->next, task_t, run_list);
+	} else if(prod_critical_nr_running) {
+	    /* Schedule critical production processes */
+	    next = sched_prod_next(critical_rq());
+	} else if(rq->nr_running) {
+	    /* Schedule other processes */
+	    queue = array->queue + idx;
+	    next = list_entry(queue->next, task_t, run_list);
+	} else {
+	    /* Schedule non-critical production processes */
+	    next = sched_prod_next(non_critical_rq());
+	}
 switch_tasks:
 	prefetch(next);
 	clear_tsk_need_resched(prev);
@@ -1167,7 +1204,7 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 	else {
 		retval = -EINVAL;
 		if (policy != SCHED_FIFO && policy != SCHED_RR &&
-				policy != SCHED_OTHER)
+				policy != SCHED_OTHER && policy != SCHED_PROD)
 			goto out_unlock;
 	}
 
@@ -1176,14 +1213,21 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 	 * 1..MAX_USER_RT_PRIO-1, valid priority for SCHED_OTHER is 0.
 	 */
 	retval = -EINVAL;
-	if (lp.sched_priority < 0 || lp.sched_priority > MAX_USER_RT_PRIO-1)
+	if (policy != SCHED_PROD) {
+	    if (lp.sched_priority < 0 || lp.sched_priority > MAX_USER_RT_PRIO-1)
 		goto out_unlock;
-	if ((policy == SCHED_OTHER) != (lp.sched_priority == 0))
+	    if ((policy == SCHED_OTHER) != (lp.sched_priority == 0))
 		goto out_unlock;
+	}
+	if (policy == SCHED_PROD && 
+	    (lp.machine_cost > MAX_MACHINE_COST || lp.process_expected_time > MAX_EXPECTED_TIME) && 
+	    lp.is_critical != PROD_CRITICAL && lp.is_critical != PROD_NOTCRITICAL)
+		goto out_unlock;
+	    
 
 	retval = -EPERM;
-	if ((policy == SCHED_FIFO || policy == SCHED_RR) &&
-	    !capable(CAP_SYS_NICE))
+	if ((policy == SCHED_FIFO || policy == SCHED_RR || (policy == SCHED_PROD && lp.is_critical == PROD_CRITICAL)) &&
+	     !capable(CAP_SYS_NICE))
 		goto out_unlock;
 	if ((current->euid != p->euid) && (current->euid != p->uid) &&
 	    !capable(CAP_SYS_NICE))
@@ -1194,8 +1238,14 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		deactivate_task(p, task_rq(p));
 	retval = 0;
 	p->policy = policy;
-	p->rt_priority = lp.sched_priority;
-	if (policy != SCHED_OTHER)
+	if(policy != SCHED_PROD)
+		p->rt_priority = lp.sched_priority;
+	else {
+		p->is_critical = lp.is_critical;
+		p->process_expected_time = lp.process_expected_time;
+		p->machine_cost = lp.machine_cost;
+	}
+	if (policy != SCHED_OTHER && policy != SCHED_PROD)
 		p->prio = MAX_USER_RT_PRIO-1 - p->rt_priority;
 	else
 		p->prio = p->static_prio;
