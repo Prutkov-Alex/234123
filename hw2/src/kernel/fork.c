@@ -786,6 +786,14 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 		current->need_resched = 1;
 
 fork_out:
+	monitor.reason = REASON_CREATED;
+	/* Reset switch count to allow another set of fresh context
+	 switch recordings.*/
+	monitor.switch_count = 0;
+
+	
+
+ bad_fork_out:
 	return retval;
 
 bad_fork_cleanup_namespace:
@@ -807,7 +815,7 @@ bad_fork_cleanup_count:
 	free_uid(p->user);
 bad_fork_free:
 	free_task_struct(p);
-	goto fork_out;
+	goto bad_fork_out;
 }
 
 /* SLAB cache for signal_struct structures (tsk->sig) */

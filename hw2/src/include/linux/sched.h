@@ -155,6 +155,28 @@ struct prod_sched_param {
 	int machine_cost;
 };
 
+/*
+ * These are 'tuning knobs' of the monitoring mechanism.
+ *
+ * MAX_SWITCHES_HISTORY is the number of switches that can be stored
+ * MAX_SWITCH_COUNT is the number of switches recorded after each 
+ *                  task creation/ending.
+ */
+#define MAX_SWITCHES_HISTORY    150
+#define MAX_SWITCH_COUNT        30
+
+/*
+ * Reasons for context_switch. Used by monitoring mechanism.
+ */
+#define REASON_TIME_SLICE       1
+#define REASON_WAITING          2
+#define REASON_PRIO             3
+#define REASON_CREATED          4
+#define REASON_ENDED            5
+#define REASON_YIELD            6
+#define REASON_DEFAULT           REASON_PRIO
+
+
 struct sched_param {
 	union {
 		int sched_priority;
@@ -176,6 +198,46 @@ struct completion;
  */
 extern rwlock_t tasklist_lock;
 extern spinlock_t mmlist_lock;
+
+/*
+ * This struct contains information on a single task switching.
+ */
+struct switch_info
+{
+  int previous_pid;
+  int next_pid;
+  int previous_policy;
+  int next_policy;
+  unsigned long time;
+  int time_slice;
+  int reason;
+};
+
+typedef struct switch_info switch_info_t;
+
+/*
+ * This struct contains monitoring information. It contains the latest
+ * recorded tasck switches as well as the ammunt of switches  performedd 
+ * from the last creation/ending of a process.
+ *
+ * At initilization, switches should be initilized to all NULLs
+ * current_index should be init to 30 and switch_count should be
+ * init to 0.
+ *
+ * The reason that the array is array of pointers is to allow us mark
+ * empty cells using NULL.
+ *
+ */
+struct monitoring_info
+{
+  switch_info_t* switches_history[MAX_SWITCHES_HISTORY];
+  int current_index;
+  int switch_count;
+  int reason;
+};
+
+/* Make monitor global */
+extern struct monitoring_info monitor;
 
 typedef struct task_struct task_t;
 

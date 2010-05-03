@@ -162,6 +162,15 @@ struct prod_runqueue {
 static struct prod_runqueue prod_runqueue __cacheline_aligned;
 static struct runqueue runqueues[NR_CPUS] __cacheline_aligned;
 
+/*
+ * Macro for easy access.
+ */
+#define OLDEST_SWITCH_INFO        monitor.switches_history[monitor.current_index]
+
+struct monitoring_info monitor;
+
+
+
 #define cpu_rq(cpu)		(runqueues + (cpu))
 #define this_rq()		cpu_rq(smp_processor_id())
 #define task_rq(p)		cpu_rq((p)->cpu)
@@ -269,13 +278,13 @@ static inline task_t *sched_prod_next(int is_critical)
 	int offset = 0;
 	if(is_critical == PROD_NON_CRITICAL) offset = 3;
 
-	if(!list_empty(prod_rq->queue[offset])) {
+	if(!list_empty(&prod_rq->queue[offset])) {
 		next = list_entry(&prod_rq->queue[offset], task_t, run_list);
 		remaining_time = next->process_expected_time - next->process_consumed_time;
 		next->time_slice = remaining_time < MAX_ONTIME_SLICE ? remaining_time : MAX_ONTIME_SLICE;
 		return next;
 	}
-	if(!list_empty(prod_rq->queue[offset + 1])) {
+	if(!list_empty(&prod_rq->queue[offset + 1])) {
 		next = list_entry(&prod_rq->queue[offset + 1], task_t, run_list);
 		remaining_time = next->process_expected_time - next->process_consumed_time;
 		next->time_slice = remaining_time < MAX_EXPENSIVE_SLICE ? remaining_time : MAX_EXPENSIVE_SLICE;
@@ -299,13 +308,13 @@ static inline void enqueue_prod_task(struct task_struct *p)
 	prod_runqueue_t *prod_rq = this_prod_rq();
 	int q_num = prod_task_queue_number(p);
 	list_t *iter;
-	int expected_time, remaining_time, max;
+	int expected_time, remaining_time;
 	if (p->is_expired == PROD_EXPIRED)
-		list_add_tail(&p->run_list,prod_rq->queue[q_num]);
-	else if (list_empty(prod_rq->queue[q_num]))
-		list_add_tail(&p->run_list,prod_rq->queue[q_num]);
+		list_add_tail(&p->run_list,&prod_rq->queue[q_num]);
+	else if (list_empty(&prod_rq->queue[q_num]))
+		list_add_tail(&p->run_list,&prod_rq->queue[q_num]);
 	else {
-		list_for_each(iter, prod_rq->queue[q_num]) {
+		list_for_each(iter, &prod_rq->queue[q_num]) {
 			expected_time = list_entry(iter->next, task_t, run_list)->process_expected_time;
 			remaining_time = expected_time - list_entry(iter->next, task_t, run_list)->process_consumed_time;
 			if(remaining_time < (p->process_expected_time - p->process_consumed_time)) {
@@ -376,9 +385,10 @@ static inline void activate_task(task_t *p, runqueue_t *rq)
 
 static inline void deactivate_task(struct task_struct *p, runqueue_t *rq)
 {
+	prod_runqueue_t *prod_rq;
 	if(p->policy == SCHED_PROD) {
-		prod_runqueue_t prod_rq = this_prod_rq();
-		dequeue_prod_task(p,prod_rq);
+		prod_rq = this_prod_rq();
+		dequeue_prod_task(p);
 		prod_rq->nr_running--;
 		return;
 	}
@@ -574,6 +584,70 @@ static inline task_t * context_switch(task_t *prev, task_t *next)
 	switch_to(prev, next, prev);
 
 	return prev;
+}
+
+
+static inline void monitor_init()
+{
+  int i;
+
+  /* Initilize monitor */
+  monitor.current_index = 0;
+  monitor.switch_count = MAX_SWITCH_COUNT;
+  monitor.reason = REASON_DEFAULT;
+  for(i = 0; i < MAX_SWITCHES_HISTORY; i++){
+    if (monitor.switches_history[i] == NULL){
+      kfree(monitor.switches_history[i]);
+    }
+    monitor.switches_history[i] = NULL;
+  }
+}
+
+/*
+ * This function performs a monitor operation of the  context switch that occured.
+ */
+static inline void monitor_context_switch(task_t *prev, task_t *next)
+{
+
+  if (monitor.switches_history[monitor.current_index] == NULL)
+    monitor.switches_history[monitor.current_index] = (switch_info_t*)kmalloc(sizeof(switch_info_t), GFP_KERNEL);
+  // If there is no enough memory, ignore this context switch. Better luck next time :)
+  if (monitor.switches_history[monitor.current_index] == NULL)
+    return;
+
+  /* Ovveride the oldest switch_info. */
+  OLDEST_SWITCH_INFO->previous_pid = prev->pid;
+  OLDEST_SWITCH_INFO->next_pid = next->pid;
+  OLDEST_SWITCH_INFO->previous_policy = prev->policy;
+  OLDEST_SWITCH_INFO->next_policy = prev->policy;
+  OLDEST_SWITCH_INFO->time = jiffies; /* TODO: verify that this should indeed be jiffies */
+  OLDEST_SWITCH_INFO->time_slice = next->time_slice;
+  
+  if(monitor.reason == REASON_DEFAULT){
+    if (prev->time_slice <= 0) // reason 1                   // TODO: Special case for PROD? The forums says that this is incorrect
+      monitor.reason = REASON_TIME_SLICE;
+    else if (prev->state == TASK_INTERRUPTIBLE || prev->state == TASK_UNINTERRUPTIBLE)
+      monitor.reason = REASON_WAITING;
+    else if (prev->state == TASK_ZOMBIE)
+      monitor.reason = REASON_YIELD;
+
+    /*
+    else if (((prev->state ^ TASK_INTERRUPTIBLE) & (prev->state ^ TASK_UNINTERRUPTIBLE)) == INT_MAX) // Reason 2 // TODO: Revise bitwise operations
+      monitor.reason = REASON_WAITING;
+    else if ((prev->state ^ TASK_ZOMBIE) == INT_MAX) // Reason 6
+    monitor.reason = REASON_YIELD;
+    */
+  }
+ 
+  // context_switch due to reason 4 or 5
+  OLDEST_SWITCH_INFO->reason = monitor.reason;
+
+
+  // Reset reason and update switch count and current index.
+  // Remember that current index should always hold the oldest recorded switch info.
+  monitor.reason = REASON_DEFAULT;
+  monitor.switch_count++;
+  monitor.current_index = ((monitor.current_index + 1) % MAX_SWITCHES_HISTORY);
 }
 
 unsigned long nr_running(void)
@@ -934,7 +1008,7 @@ need_resched:
 	rq = this_rq();
 	prod_rq = this_prod_rq();
 	prod_nr_running = prod_rq->nr_running;
-	if(list_empty(prod_rq->queue[0]) && list_empty(prod_rq->queue[1]) && list_empty(prod_rq->queue[2])) prod_critical_running = 0;
+	if(list_empty(&prod_rq->queue[0]) && list_empty(&prod_rq->queue[1]) && list_empty(&prod_rq->queue[2])) prod_critical_running = 0;
 
 	release_kernel_lock(prev, smp_processor_id());
 	prepare_arch_schedule(prev);
@@ -981,7 +1055,7 @@ pick_next_task:
 	/* If there are real time priority processes schedule them */
 	if(idx < MAX_RT_PRIO) {
 	    queue = array->queue + idx;
-	    next = list_entry(queue->next, task_t, un_list);
+	    next = list_entry(queue->next, task_t, run_list);
 	} else if(prod_critical_running) {
 	    /* Schedule critical production processes */
 	    next = sched_prod_next(PROD_CRITICAL);
@@ -1000,7 +1074,13 @@ switch_tasks:
 	if (likely(prev != next)) {
 		rq->nr_switches++;
 		rq->curr = next;
-	
+		
+	        /*
+		 * If needed, monitor the last context_switch
+		 */
+		if (monitor.switch_count < MAX_SWITCH_COUNT)
+		  monitor_context_switch(prev, next);
+
 		prepare_arch_switch(rq);
 		prev = context_switch(prev, next);
 		barrier();
@@ -1319,13 +1399,13 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		goto out_unlock;
 	}
 	if (policy == SCHED_PROD && 
-	    (lp.machine_cost > MAX_MACHINE_COST || lp.process_expected_time > MAX_EXPECTED_TIME) && 
-	    lp.is_critical != PROD_CRITICAL && lp.is_critical != PROD_NOTCRITICAL)
+	    (lp.prod_params.machine_cost > MAX_MACHINE_COST || lp.prod_params.process_expected_time > MAX_EXPECTED_TIME) && 
+	    lp.prod_params.is_critical != PROD_CRITICAL && lp.prod_params.is_critical != PROD_NON_CRITICAL)
 		goto out_unlock;
 	    
 
 	retval = -EPERM;
-	if ((policy == SCHED_FIFO || policy == SCHED_RR || (policy == SCHED_PROD && lp.is_critical == PROD_CRITICAL)) &&
+	if ((policy == SCHED_FIFO || policy == SCHED_RR || (policy == SCHED_PROD && lp.prod_params.is_critical == PROD_CRITICAL)) &&
 	     !capable(CAP_SYS_NICE))
 		goto out_unlock;
 	if ((current->euid != p->euid) && (current->euid != p->uid) &&
@@ -1340,9 +1420,9 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 	if(policy != SCHED_PROD)
 		p->rt_priority = lp.sched_priority;
 	else {
-		p->is_critical = lp.is_critical;
-		p->process_expected_time = MSECS_TO_JIFFIES(lp.process_expected_time);
-		p->machine_cost = lp.machine_cost;
+		p->is_critical = lp.prod_params.is_critical;
+		p->process_expected_time = MSECS_TO_JIFFIES(lp.prod_params.process_expected_time);
+		p->machine_cost = lp.prod_params.machine_cost;
 		p->process_consumed_time = 0;
 		p->is_expired = PROD_ONTIME;
 		p->is_expensive = PROD_NOT_EXPENSIVE;
@@ -1625,6 +1705,35 @@ out_nounlock:
 	return retval;
 }
 
+/*
+ * This syscall returns an info about the latest context switches.
+ *
+ * The array returned is ordered starting from the oldest switch_info.
+ * Returns: if failure -1 otherwie the number of items in the returned array.
+ * This syscall will reset the monitor on success.
+ */
+asmlinkage int sys_get_scheduling_statistic (struct switch_info* switches_history)
+{
+  int i, n = 0;
+  switch_info_t* curr_switch_info;
+
+
+  for(i = 0; i < MAX_SWITCHES_HISTORY; i++){
+    curr_switch_info = monitor.switches_history[(i + monitor.current_index) % MAX_SWITCHES_HISTORY];
+    
+    if (curr_switch_info != NULL) {
+      // copy_to_user returns the number of bytes that were not copied.
+      if (copy_to_user(switches_history + n, curr_switch_info, sizeof(switch_info_t)) != 0)
+	return -1;
+      n++; // n counts the number of elements copied to the switches history.
+    }
+  }
+  monitor_init();
+
+  return n; 
+}
+
+
 static void show_task(task_t * p)
 {
 	unsigned long free = 0;
@@ -1786,6 +1895,8 @@ void __init sched_init(void)
 	prod_rq = this_prod_rq();
 	for (i = 0; i < 6; ++i)
 		INIT_LIST_HEAD(&prod_rq->queue[i]);
+	
+	monitor_init();
 
 	for (i = 0; i < NR_CPUS; i++) {
 		prio_array_t *array;
