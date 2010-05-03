@@ -128,10 +128,26 @@ extern unsigned long nr_uninterruptible(void);
 #define PROD_CRITICAL		1
 
 /*
- * Production policy (not)critical flags
+ * Production policy expiration flags
  */
 #define PROD_ONTIME 		0
 #define PROD_EXPIRED		1
+
+/*
+ * Production policy expensive flags
+ */
+#define PROD_EXPENSIVE 		0
+#define PROD_NOT_EXPENSIVE	1
+
+/*
+ * Production policy limits
+ */
+#define MAX_EXPECTED_TIME       300
+#define MAX_MACHINE_COST	1000
+#define MIN_EXPENSIVE_COST      3000
+#define MAX_ONTIME_SLICE        MSECS_TO_JIFFIES(100)
+#define MAX_EXPENSIVE_SLICE     MSECS_TO_JIFFIES(150)
+#define EXPIRED_SLICE           MSECS_TO_JIFFIES(250)
 
 struct prod_sched_param {
 	int is_critical;
@@ -476,9 +492,10 @@ struct task_struct {
 /* Production scheduler variables */
 	int is_critical;
 	int process_expected_time;
-	int is_expenSsive;
+	int is_expensive;
 	int process_consumed_time;
 	int machine_cost;
+	int is_expired;
 };
 
 /*

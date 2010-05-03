@@ -112,6 +112,12 @@
 #define TASK_TIMESLICE(p) (MIN_TIMESLICE + \
 	((MAX_TIMESLICE - MIN_TIMESLICE) * (MAX_PRIO-1-(p)->static_prio)/39))
 
+/* 
+ * Following 2 macros convert between jiffies and milliseconds
+ */
+#define JIFFIES_TO_MSECS(t) (((t) / HZ) * 1000)
+#define MSECS_TO_JIFFIES(t) (((t) / 1000) * HZ)
+
 /*
  * These are the runqueue data structures:
  */
@@ -147,11 +153,13 @@ struct runqueue {
 
 /* This is runqueue for SCHED_PROD scheduler */
 struct prod_runqueue {
-    list_t queue[3];		/* One queue per on-time, expensive and expired tasks */
+    list_t queue[6];		/* One queue per on-time, expensive and expired
+				 * tasks, doubled by (non)critical flag */
     unsigned long nr_running;
+    /* unsigned long nr_uninterruptible; */
 };
 
-static struct prod_runqueue prod_runqueues[2] __cacheline_aligned;
+static struct prod_runqueue prod_runqueue __cacheline_aligned;
 static struct runqueue runqueues[NR_CPUS] __cacheline_aligned;
 
 #define cpu_rq(cpu)		(runqueues + (cpu))
@@ -160,8 +168,23 @@ static struct runqueue runqueues[NR_CPUS] __cacheline_aligned;
 #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
 #define rt_task(p)		((p)->prio < MAX_RT_PRIO && (p)->policy != SCHED_PROD)
 
-#define critical_rq()           (prod_runqueues[0])
-#define non_critical_rq()       (prod_runqueues[1])
+#define this_prod_rq()           (&prod_runqueue)
+
+/*
+ * Function returning number (0-5) based on on-time,expensive,expired 
+ * and critical flags.
+ */
+static inline int prod_task_queue_number(task_t *p)
+{
+	int expensive = p->is_expensive;
+	int expired   = p->is_expired;
+	int critical  = p->is_critical;
+	int n = 0;
+	if(critical == PROD_CRITICAL) n += 3;
+	if(expensive == PROD_EXPENSIVE) n++;
+	if(expired == PROD_EXPIRED) n++;
+	return n;
+}
 
 /*
  * Default context-switch locking:
@@ -237,6 +260,66 @@ static inline void enqueue_task(struct task_struct *p, prio_array_t *array)
 	p->array = array;
 }
 
+/* sched_prod_next - returns next (non)critical (depending on argument) to run */
+static inline task_t *sched_prod_next(int is_critical)
+{
+	prod_runqueue_t *prod_rq = this_prod_rq();
+	task_t *next;
+	int remaining_time;
+	int offset = 0;
+	if(is_critical == PROD_NON_CRITICAL) offset = 3;
+
+	if(!list_empty(prod_rq->queue[offset])) {
+		next = list_entry(&prod_rq->queue[offset], task_t, run_list);
+		remaining_time = next->process_expected_time - next->process_consumed_time;
+		next->time_slice = remaining_time < MAX_ONTIME_SLICE ? remaining_time : MAX_ONTIME_SLICE;
+		return next;
+	}
+	if(!list_empty(prod_rq->queue[offset + 1])) {
+		next = list_entry(&prod_rq->queue[offset + 1], task_t, run_list);
+		remaining_time = next->process_expected_time - next->process_consumed_time;
+		next->time_slice = remaining_time < MAX_EXPENSIVE_SLICE ? remaining_time : MAX_EXPENSIVE_SLICE;
+		return next;
+	}
+	next = list_entry(&prod_rq->queue[offset + 2], task_t, run_list);
+	next->time_slice = EXPIRED_SLICE;
+	return next;
+}
+
+/*
+ * Adding/removing a task to/from a production runqueue;
+ */
+static inline void dequeue_prod_task(struct task_struct *p)
+{
+	list_del(&p->run_list);
+}
+
+static inline void enqueue_prod_task(struct task_struct *p)
+{
+	prod_runqueue_t *prod_rq = this_prod_rq();
+	int q_num = prod_task_queue_number(p);
+	list_t *iter;
+	int expected_time, remaining_time, max;
+	if (p->is_expired == PROD_EXPIRED)
+		list_add_tail(&p->run_list,prod_rq->queue[q_num]);
+	else if (list_empty(prod_rq->queue[q_num]))
+		list_add_tail(&p->run_list,prod_rq->queue[q_num]);
+	else {
+		list_for_each(iter, prod_rq->queue[q_num]) {
+			expected_time = list_entry(iter->next, task_t, run_list)->process_expected_time;
+			remaining_time = expected_time - list_entry(iter->next, task_t, run_list)->process_consumed_time;
+			if(remaining_time < (p->process_expected_time - p->process_consumed_time)) {
+				break;
+			}
+		}
+		list_add(&p->run_list, iter->prev);
+	}
+}
+
+/*
+ * Return task's queue in production runqueue
+ */
+
 static inline int effective_prio(task_t *p)
 {
 	int bonus, prio;
@@ -268,6 +351,12 @@ static inline void activate_task(task_t *p, runqueue_t *rq)
 	unsigned long sleep_time = jiffies - p->sleep_timestamp;
 	prio_array_t *array = rq->active;
 
+	if (p->policy == SCHED_PROD) {
+		prod_runqueue_t *prod_rq = this_prod_rq();
+		enqueue_prod_task(p);
+		prod_rq->nr_running++;
+		return;
+	}
 	if (!rt_task(p) && sleep_time) {
 		/*
 		 * This code gives a bonus to interactive tasks. We update
@@ -287,6 +376,12 @@ static inline void activate_task(task_t *p, runqueue_t *rq)
 
 static inline void deactivate_task(struct task_struct *p, runqueue_t *rq)
 {
+	if(p->policy == SCHED_PROD) {
+		prod_runqueue_t prod_rq = this_prod_rq();
+		dequeue_prod_task(p,prod_rq);
+		prod_rq->nr_running--;
+		return;
+	}
 	rq->nr_running--;
 	if (p->state == TASK_UNINTERRUPTIBLE)
 		rq->nr_uninterruptible++;
@@ -781,24 +876,31 @@ void scheduler_tick(int user_tick, int system)
 	 */
 	if (p->sleep_avg)
 		p->sleep_avg--;
+	if (p->policy == SCHED_PROD) {
+		++p->process_consumed_time;
+		if(p->process_consumed_time == p->process_expected_time) {
+			p->is_expired = PROD_EXPIRED;
+		}
+	}
 	if (!--p->time_slice) {
-	    if(p->policy == SCHED_PROD) {
-		set_tsk_need_resched(p);
-		/* Update here production runqueue. Find new place for p */
-	    } else {
-		dequeue_task(p, rq->active);
-		set_tsk_need_resched(p);
-		p->prio = effective_prio(p);
-		p->first_time_slice = 0;
-		p->time_slice = TASK_TIMESLICE(p);
-
-		if (!TASK_INTERACTIVE(p) || EXPIRED_STARVING(rq)) {
-			if (!rq->expired_timestamp)
-				rq->expired_timestamp = jiffies;
-			enqueue_task(p, rq->expired);
-		} else
-			enqueue_task(p, rq->active);
-	    }		
+		if(p->policy == SCHED_PROD) {
+			dequeue_prod_task(p);
+			set_tsk_need_resched(p);
+			enqueue_prod_task(p);
+		} else {
+			dequeue_task(p, rq->active);
+			set_tsk_need_resched(p);
+			p->prio = effective_prio(p);
+			p->first_time_slice = 0;
+			p->time_slice = TASK_TIMESLICE(p);
+			
+			if (!TASK_INTERACTIVE(p) || EXPIRED_STARVING(rq)) {
+				if (!rq->expired_timestamp)
+					rq->expired_timestamp = jiffies;
+				enqueue_task(p, rq->expired);
+			} else
+				enqueue_task(p, rq->active);
+		}		
 	}
 out:
 #if CONFIG_SMP
@@ -822,8 +924,7 @@ asmlinkage void schedule(void)
 	list_t *queue;
 	int idx;
 	unsigned long prod_nr_running;
-	unsigned long prod_critical_nr_running;
-	unsigned long prod_non_critical_nr_running;
+	int prod_critical_running = 1;
 
 	if (unlikely(in_interrupt()))
 		BUG();
@@ -831,11 +932,9 @@ asmlinkage void schedule(void)
 need_resched:
 	prev = current;
 	rq = this_rq();
-	prod_rq = critical_rq();
-	prod_critical_nr_running = prod_rq->nr_running;
-	prod_rq = non_critical_rq();
-	prod_non_critical_nr_running = prod_rq->nr_running;
-	prod_nr_running = prod_critical_nr_running + prod_non_critical_nr_running;
+	prod_rq = this_prod_rq();
+	prod_nr_running = prod_rq->nr_running;
+	if(list_empty(prod_rq->queue[0]) && list_empty(prod_rq->queue[1]) && list_empty(prod_rq->queue[2])) prod_critical_running = 0;
 
 	release_kernel_lock(prev, smp_processor_id());
 	prepare_arch_schedule(prev);
@@ -882,17 +981,17 @@ pick_next_task:
 	/* If there are real time priority processes schedule them */
 	if(idx < MAX_RT_PRIO) {
 	    queue = array->queue + idx;
-	    next = list_entry(queue->next, task_t, run_list);
-	} else if(prod_critical_nr_running) {
+	    next = list_entry(queue->next, task_t, un_list);
+	} else if(prod_critical_running) {
 	    /* Schedule critical production processes */
-	    next = sched_prod_next(critical_rq());
+	    next = sched_prod_next(PROD_CRITICAL);
 	} else if(rq->nr_running) {
 	    /* Schedule other processes */
 	    queue = array->queue + idx;
 	    next = list_entry(queue->next, task_t, run_list);
 	} else {
 	    /* Schedule non-critical production processes */
-	    next = sched_prod_next(non_critical_rq());
+	    next = sched_prod_next(PROD_NON_CRITICAL);
 	}
 switch_tasks:
 	prefetch(next);
@@ -1242,8 +1341,15 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		p->rt_priority = lp.sched_priority;
 	else {
 		p->is_critical = lp.is_critical;
-		p->process_expected_time = lp.process_expected_time;
+		p->process_expected_time = MSECS_TO_JIFFIES(lp.process_expected_time);
 		p->machine_cost = lp.machine_cost;
+		p->process_consumed_time = 0;
+		p->is_expired = PROD_ONTIME;
+		p->is_expensive = PROD_NOT_EXPENSIVE;
+		if(p->process_consumed_time >= p->process_expected_time)
+			p->is_expired = PROD_EXPIRED;
+		if((p->process_expected_time * p->machine_cost) > MIN_EXPENSIVE_COST)
+			p->is_expensive = PROD_EXPENSIVE;
 	}
 	if (policy != SCHED_OTHER && policy != SCHED_PROD)
 		p->prio = MAX_USER_RT_PRIO-1 - p->rt_priority;
@@ -1312,7 +1418,7 @@ asmlinkage long sys_sched_getparam(pid_t pid, struct sched_param *param)
 	else
 	  {
 	    lp.prod_params.is_critical = p->is_critical;
-	    lp.prod_params.process_expected_time = p->process_expected_time;
+	    lp.prod_params.process_expected_time = JIFFIES_TO_MSECS(p->process_expected_time);
 	    lp.prod_params.machine_cost = p->machine_cost;
 	  }
 	read_unlock(&tasklist_lock);
@@ -1673,8 +1779,13 @@ extern void immediate_bh(void);
 
 void __init sched_init(void)
 {
+	prod_runqueue_t *prod_rq;
 	runqueue_t *rq;
 	int i, j, k;
+
+	prod_rq = this_prod_rq();
+	for (i = 0; i < 6; ++i)
+		INIT_LIST_HEAD(&prod_rq->queue[i]);
 
 	for (i = 0; i < NR_CPUS; i++) {
 		prio_array_t *array;
