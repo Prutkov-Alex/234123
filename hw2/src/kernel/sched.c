@@ -189,9 +189,12 @@ static inline int prod_task_queue_number(task_t *p)
 	int expired   = p->is_expired;
 	int critical  = p->is_critical;
 	int n = 0;
-	if(critical == PROD_CRITICAL) n += 3;
+	if(critical == PROD_NON_CRITICAL) n += 3;
+	if(expired == PROD_EXPIRED) {
+	    n += 2;
+	    return n;
+	}
 	if(expensive == PROD_EXPENSIVE) n++;
-	if(expired == PROD_EXPIRED) n++;
 	return n;
 }
 
