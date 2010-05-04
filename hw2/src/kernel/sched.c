@@ -1413,7 +1413,7 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		goto out_unlock;
 
 	array = p->array;
-	if (array)
+	if (array || p->policy == SCHED_PROD)
 		deactivate_task(p, task_rq(p));
 	retval = 0;
 	p->policy = policy;
@@ -1435,7 +1435,7 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		p->prio = MAX_USER_RT_PRIO-1 - p->rt_priority;
 	else
 		p->prio = p->static_prio;
-	if (array)
+	if (array || p->policy == SCHED_PROD)
 		activate_task(p, task_rq(p));
 
 out_unlock:

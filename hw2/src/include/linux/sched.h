@@ -181,7 +181,7 @@ struct sched_param {
 	union {
 		int sched_priority;
 		struct prod_sched_param prod_params;
-	}
+	};
 };
 
 struct completion;
