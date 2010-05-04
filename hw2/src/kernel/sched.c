@@ -29,6 +29,29 @@
 
 #include <linux/slab.h>
 
+/* This syscall returns remaining time for in jiffies of blabla */
+asmlinkage int sys_prod_query_remaining_time (int pid)
+{
+  task_t* task = find_task_by_pid(pid);
+  if(task == NULL || task->policy != SCHED_PROD){
+    return -EINVAL;
+  }
+  
+  return task->process_expected_time - task->process_consumed_time > 0 ? task->process_expected_time - task->process_consumed_time : 0;
+  
+}
+
+/* This syscall returns amount of jiffies that task consumed */
+
+asmlinkage int sys_prod_query_expired_time(int pid)
+{
+  task_t* task = find_task_by_pid(pid);
+  if(task == NULL || task->policy != SCHED_PROD) return -EINVAL;
+
+  return task->process_consumed_time - task->process_expected_time > 0 ? (task->process_consumed_time - task->process_expected_time) : 0;
+}
+
+
 /*
  * Convert user-nice values [ -20 ... 0 ... 19 ]
  * to static priority [ MAX_RT_PRIO..MAX_PRIO-1 ],
@@ -287,18 +310,18 @@ static inline task_t *sched_prod_next(int is_critical)
 		next = list_entry((&prod_rq->queue[offset])->next, task_t, run_list);
 		remaining_time = next->process_expected_time - next->process_consumed_time;
 		next->time_slice = remaining_time < MAX_ONTIME_SLICE ? remaining_time : MAX_ONTIME_SLICE;
-		printk("SCHEDULING ONTIME TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired);
+		/* printk("SCHEDULING ONTIME TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired); */
 		return next;
 	}
 	if(!list_empty(&prod_rq->queue[offset + 1])) {
 		next = list_entry((&prod_rq->queue[offset + 1])->next, task_t, run_list);
 		remaining_time = next->process_expected_time - next->process_consumed_time;
 		next->time_slice = remaining_time < MAX_EXPENSIVE_SLICE ? remaining_time : MAX_EXPENSIVE_SLICE;
-		printk("SCHEDULING EXPENSIVE TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired);
+		/* printk("SCHEDULING EXPENSIVE TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired); */
 		return next;
 	}
 	next = list_entry((&prod_rq->queue[offset + 2])->next, task_t, run_list);
-	printk("SCHEDULING EXPIRED TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired);
+	/* printk("SCHEDULING EXPIRED TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired); */
 	next->time_slice = EXPIRED_SLICE;
 	return next;
 }
@@ -318,7 +341,7 @@ static inline void enqueue_prod_task(struct task_struct *p)
 	list_t *iter;
 	int expected_time, remaining_time;
 
-	printk("QUEUEING TASK %d(%d,%d,%d) TO: %d\n",p->pid,p->is_critical,p->is_expensive,p->is_expired,q_num);
+	/* printk("QUEUEING TASK %d(%d,%d,%d) TO: %d\n",p->pid,p->is_critical,p->is_expensive,p->is_expired,q_num); */
 	if (p->is_expired == PROD_EXPIRED)
 		list_add_tail(&p->run_list,&prod_rq->queue[q_num]);
 	/* else if (list_empty(&prod_rq->queue[q_num])) */
@@ -1089,7 +1112,7 @@ switch_tasks:
 		 * If needed, monitor the last context_switch
 		 */
 		if (monitor.switch_count < MAX_SWITCH_COUNT)
-		  monitor_context_switch(prev, next);
+			monitor_context_switch(prev, next);
 
 		prepare_arch_switch(rq);
 		prev = context_switch(prev, next);
@@ -1355,6 +1378,7 @@ static inline task_t *find_process_by_pid(pid_t pid)
 	return pid ? find_task_by_pid(pid) : current;
 }
 
+#define MAX_EXPECTED_TIME       300000
 static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 {
 	struct sched_param lp;
@@ -1363,6 +1387,7 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 	unsigned long flags;
 	runqueue_t *rq;
 	task_t *p;
+	long cost;
 
 	if (!param || pid < 0)
 		goto out_nounlock;
@@ -1370,8 +1395,6 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 	retval = -EFAULT;
 	if (copy_from_user(&lp, param, sizeof(struct sched_param)))
 		goto out_nounlock;
-
-	if (policy == SCHED_PROD) printk("CRITICAL: %d\n",lp.prod_params.is_critical);
 
 	/*
 	 * We play safe to avoid deadlocks.
@@ -1411,9 +1434,9 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		goto out_unlock;
 	}
 	if (policy == SCHED_PROD && 
-	    (lp.prod_params.machine_cost > MAX_MACHINE_COST || lp.prod_params.machine_cost <= MIN_MACHINE_COST || 
-	     lp.prod_params.process_expected_time > MAX_EXPECTED_TIME || lp.prod_params.process_expected_time <= MIN_EXPECTED_TIME) && 
-	    lp.prod_params.is_critical != PROD_CRITICAL && lp.prod_params.is_critical != PROD_NON_CRITICAL)
+	    (lp.prod_params.machine_cost > MAX_MACHINE_COST || lp.prod_params.machine_cost <= MIN_MACHINE_COST ||
+	     lp.prod_params.process_expected_time > MAX_EXPECTED_TIME || lp.prod_params.process_expected_time <= MIN_EXPECTED_TIME || 
+	     (lp.prod_params.is_critical != PROD_CRITICAL && lp.prod_params.is_critical != PROD_NON_CRITICAL)))
 		goto out_unlock;
 	    
 
@@ -1441,7 +1464,9 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		p->is_expensive = PROD_NOT_EXPENSIVE;
 		if(p->process_consumed_time >= p->process_expected_time)
 			p->is_expired = PROD_EXPIRED;
-		if((p->process_expected_time * p->machine_cost) > MIN_EXPENSIVE_COST)
+		cost = lp.prod_params.process_expected_time * p->machine_cost;
+		printk("TASK: %d(%d,%d), COST: %d\n",p->process_expected_time,p->machine_cost,p->pid,cost);
+		if(cost > MIN_EXPENSIVE_COST)
 			p->is_expensive = PROD_EXPENSIVE;
 	}
 	if (policy != SCHED_OTHER && policy != SCHED_PROD)
@@ -1727,23 +1752,23 @@ out_nounlock:
  */
 asmlinkage int sys_get_scheduling_statistic (struct switch_info* switches_history)
 {
-  int i, n = 0;
-  switch_info_t* curr_switch_info;
+	int i, n = 0;
+	switch_info_t* curr_switch_info;
 
 
-  for(i = 0; i < MAX_SWITCHES_HISTORY; i++){
-    curr_switch_info = monitor.switches_history[(i + monitor.current_index) % MAX_SWITCHES_HISTORY];
+	for(i = 0; i < MAX_SWITCHES_HISTORY; i++){
+		curr_switch_info = monitor.switches_history[(i + monitor.current_index) % MAX_SWITCHES_HISTORY];
     
-    if (curr_switch_info != NULL) {
-      // copy_to_user returns the number of bytes that were not copied.
-      if (copy_to_user(switches_history + n, curr_switch_info, sizeof(switch_info_t)) != 0)
-	return -1;
-      n++; // n counts the number of elements copied to the switches history.
-    }
-  }
-  monitor_init();
+		if (curr_switch_info != NULL) {
+			// copy_to_user returns the number of bytes that were not copied.
+			if (copy_to_user(switches_history + n, curr_switch_info, sizeof(switch_info_t)) != 0)
+				return -EFAULT;
+			n++; // n counts the number of elements copied to the switches history.
+		}
+	}
+	monitor_init();
 
-  return n; 
+	return n; 
 }
 
 

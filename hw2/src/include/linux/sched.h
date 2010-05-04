@@ -142,7 +142,7 @@ extern unsigned long nr_uninterruptible(void);
 /*
  * Production policy limits
  */
-#define MAX_EXPECTED_TIME       300
+#define MAX_EXPECTED_TIME       300000
 #define MIN_EXPECTED_TIME       0
 #define MAX_MACHINE_COST	1000
 #define MIN_MACHINE_COST	0

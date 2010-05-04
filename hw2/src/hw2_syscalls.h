@@ -54,7 +54,7 @@ int prod_query_remaining_time(int pid)
   return res;
 }
 
-int prod_query_expited_time(int pid)
+int prod_query_expired_time(int pid)
 {
   int res;
 
@@ -91,8 +91,10 @@ int get_scheduling_statistic(struct switch_info* switches_history)
      : "%eax", "%ebx"
      );
   
-  if(res == -1)
-    errno = -EFAULT;
+  if(res < 0){
+    errno = res;
+    res = -1;
+  }
   return res;
 }
 

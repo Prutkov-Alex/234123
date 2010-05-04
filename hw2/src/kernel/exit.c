@@ -526,15 +526,13 @@ fake_volatile:
 	if (tsk->binfmt && tsk->binfmt->module)
 		__MOD_DEC_USE_COUNT(tsk->binfmt->module);
 
-	tsk->exit_code = code;
-	exit_notify();
-
         /* Reset switch count to allow another set of fresh context
 	   switch recordings. */
 	monitor.switch_count = 0;
-	
 	monitor.reason = REASON_ENDED;
 
+	tsk->exit_code = code;
+	exit_notify();
 
 	schedule();
 	BUG();
