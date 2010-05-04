@@ -27,6 +27,8 @@
 #include <linux/completion.h>
 #include <linux/kernel_stat.h>
 
+#include <linux/slab.h>
+
 /*
  * Convert user-nice values [ -20 ... 0 ... 19 ]
  * to static priority [ MAX_RT_PRIO..MAX_PRIO-1 ],
@@ -115,8 +117,8 @@
 /* 
  * Following 2 macros convert between jiffies and milliseconds
  */
-#define JIFFIES_TO_MSECS(t) (((t) / HZ) * 1000)
-#define MSECS_TO_JIFFIES(t) (((t) / 1000) * HZ)
+#define JIFFIES_TO_MSECS(t) (((t) * 1000) / HZ)
+#define MSECS_TO_JIFFIES(t) (((t) * HZ) / 1000)
 
 /*
  * These are the runqueue data structures:
@@ -189,12 +191,12 @@ static inline int prod_task_queue_number(task_t *p)
 	int expired   = p->is_expired;
 	int critical  = p->is_critical;
 	int n = 0;
-	if(critical == PROD_NON_CRITICAL) n += 3;
-	if(expired == PROD_EXPIRED) {
+	if(critical == PROD_NON_CRITICAL) n = 3;
+	if(expired  == PROD_EXPIRED) {
 	    n += 2;
 	    return n;
 	}
-	if(expensive == PROD_EXPENSIVE) n++;
+	if(expensive == PROD_EXPENSIVE) ++n;
 	return n;
 }
 
@@ -282,18 +284,21 @@ static inline task_t *sched_prod_next(int is_critical)
 	if(is_critical == PROD_NON_CRITICAL) offset = 3;
 
 	if(!list_empty(&prod_rq->queue[offset])) {
-		next = list_entry(&prod_rq->queue[offset], task_t, run_list);
+		next = list_entry((&prod_rq->queue[offset])->next, task_t, run_list);
 		remaining_time = next->process_expected_time - next->process_consumed_time;
 		next->time_slice = remaining_time < MAX_ONTIME_SLICE ? remaining_time : MAX_ONTIME_SLICE;
+		printk("SCHEDULING ONTIME TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired);
 		return next;
 	}
 	if(!list_empty(&prod_rq->queue[offset + 1])) {
-		next = list_entry(&prod_rq->queue[offset + 1], task_t, run_list);
+		next = list_entry((&prod_rq->queue[offset + 1])->next, task_t, run_list);
 		remaining_time = next->process_expected_time - next->process_consumed_time;
 		next->time_slice = remaining_time < MAX_EXPENSIVE_SLICE ? remaining_time : MAX_EXPENSIVE_SLICE;
+		printk("SCHEDULING EXPENSIVE TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired);
 		return next;
 	}
-	next = list_entry(&prod_rq->queue[offset + 2], task_t, run_list);
+	next = list_entry((&prod_rq->queue[offset + 2])->next, task_t, run_list);
+	printk("SCHEDULING EXPIRED TASK PID:%d (%d,%d,%d)\n",next->pid,next->is_critical,next->is_expensive,next->is_expired);
 	next->time_slice = EXPIRED_SLICE;
 	return next;
 }
@@ -312,14 +317,16 @@ static inline void enqueue_prod_task(struct task_struct *p)
 	int q_num = prod_task_queue_number(p);
 	list_t *iter;
 	int expected_time, remaining_time;
+
+	printk("QUEUEING TASK %d(%d,%d,%d) TO: %d\n",p->pid,p->is_critical,p->is_expensive,p->is_expired,q_num);
 	if (p->is_expired == PROD_EXPIRED)
 		list_add_tail(&p->run_list,&prod_rq->queue[q_num]);
-	else if (list_empty(&prod_rq->queue[q_num]))
-		list_add_tail(&p->run_list,&prod_rq->queue[q_num]);
+	/* else if (list_empty(&prod_rq->queue[q_num])) */
+	/* 	list_add_tail(&p->run_list,&prod_rq->queue[q_num]); */
 	else {
 		list_for_each(iter, &prod_rq->queue[q_num]) {
-			expected_time = list_entry(iter->next, task_t, run_list)->process_expected_time;
-			remaining_time = expected_time - list_entry(iter->next, task_t, run_list)->process_consumed_time;
+			expected_time = list_entry(iter, task_t, run_list)->process_expected_time;
+			remaining_time = expected_time - list_entry(iter, task_t, run_list)->process_consumed_time;
 			if(remaining_time < (p->process_expected_time - p->process_consumed_time)) {
 				break;
 			}
@@ -362,9 +369,9 @@ static inline void activate_task(task_t *p, runqueue_t *rq)
 {
 	unsigned long sleep_time = jiffies - p->sleep_timestamp;
 	prio_array_t *array = rq->active;
+	prod_runqueue_t *prod_rq = this_prod_rq();
 
-	if (p->policy == SCHED_PROD) {
-		prod_runqueue_t *prod_rq = this_prod_rq();
+	if (p->policy == SCHED_PROD) {	
 		enqueue_prod_task(p);
 		prod_rq->nr_running++;
 		return;
@@ -590,20 +597,20 @@ static inline task_t * context_switch(task_t *prev, task_t *next)
 }
 
 
-static inline void monitor_init()
+static inline void monitor_init(void)
 {
-  int i;
+	int i;
 
-  /* Initilize monitor */
-  monitor.current_index = 0;
-  monitor.switch_count = MAX_SWITCH_COUNT;
-  monitor.reason = REASON_DEFAULT;
-  for(i = 0; i < MAX_SWITCHES_HISTORY; i++){
-    if (monitor.switches_history[i] == NULL){
-      kfree(monitor.switches_history[i]);
-    }
-    monitor.switches_history[i] = NULL;
-  }
+	/* Initilize monitor */
+	monitor.current_index = 0;
+	monitor.switch_count = MAX_SWITCH_COUNT;
+	monitor.reason = REASON_DEFAULT;
+	for(i = 0; i < MAX_SWITCHES_HISTORY; i++){
+		if (monitor.switches_history[i] == NULL){
+			kfree(monitor.switches_history[i]);
+		}
+		monitor.switches_history[i] = NULL;
+	}
 }
 
 /*
@@ -1364,6 +1371,8 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 	if (copy_from_user(&lp, param, sizeof(struct sched_param)))
 		goto out_nounlock;
 
+	if (policy == SCHED_PROD) printk("CRITICAL: %d\n",lp.prod_params.is_critical);
+
 	/*
 	 * We play safe to avoid deadlocks.
 	 */
@@ -1402,7 +1411,8 @@ static int setscheduler(pid_t pid, int policy, struct sched_param *param)
 		goto out_unlock;
 	}
 	if (policy == SCHED_PROD && 
-	    (lp.prod_params.machine_cost > MAX_MACHINE_COST || lp.prod_params.process_expected_time > MAX_EXPECTED_TIME) && 
+	    (lp.prod_params.machine_cost > MAX_MACHINE_COST || lp.prod_params.machine_cost <= MIN_MACHINE_COST || 
+	     lp.prod_params.process_expected_time > MAX_EXPECTED_TIME || lp.prod_params.process_expected_time <= MIN_EXPECTED_TIME) && 
 	    lp.prod_params.is_critical != PROD_CRITICAL && lp.prod_params.is_critical != PROD_NON_CRITICAL)
 		goto out_unlock;
 	    

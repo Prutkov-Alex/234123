@@ -143,7 +143,9 @@ extern unsigned long nr_uninterruptible(void);
  * Production policy limits
  */
 #define MAX_EXPECTED_TIME       300
+#define MIN_EXPECTED_TIME       0
 #define MAX_MACHINE_COST	1000
+#define MIN_MACHINE_COST	0
 #define MIN_EXPENSIVE_COST      3000
 #define MAX_ONTIME_SLICE        MSECS_TO_JIFFIES(100)
 #define MAX_EXPENSIVE_SLICE     MSECS_TO_JIFFIES(150)
