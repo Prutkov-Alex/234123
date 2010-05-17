@@ -47,10 +47,11 @@ struct thread_struct_t {
 
 /** 
  * thread_id_list_t structure represents thread id list.
- * This structure holds thread ids in circular linked list.
+ * This structure holds thread ids in circular double linked list.
  */
 struct thread_id_list_struct_t {
     thread_id id;		/**< holds thread id */
+    thread_id_list_t *prev;	/**< pointer to previous element in list */
     thread_id_list_t *next;	/**< pointer to next element in list */
 };
 
@@ -75,13 +76,16 @@ static int remaining_time;
 int uthread_id_list_add(thread_id id) {
     thread_id_list_t *id_list = thread_id_list;
     thread_id_list_t *new_id = malloc(sizeof(thread_id_list_t));
+    thread_id i;
     if(new_id == NULL)
 	return UTHREAD_FAIL;
 
-    while(id_list->next != thread_id_list)
+    for(i=0; i<id; ++i) 
 	id_list = id_list->next;
-    new_id->next = id_list->next;
-    id_list->next = new_id;
+    new_id->prev = id_list->prev;
+    new_id->next = id_list;
+    id_list->prev->next = new_id;
+    id_list->prev = new_id;
     return UTHREAD_SUCCESS;
 }
 
@@ -95,17 +99,26 @@ int uthread_id_list_add(thread_id id) {
  * otherwise.
  */
 int uthread_id_list_remove(thread_id id) {
-    
+    thread_id_list_t *current_id = thread_id_list->next;
+    while(current_id != thread_id_list)
+	if(current_id->id == id)
+	    break;
+    if(current_id->id != id)
+	return UTHREAD_FAIL;
+    current_id->next->prev = current_id->prev;
+    current_id->prev->next = current_id->next;
+    free(current_id);
+    return UTHREAD_SUCCESS;
 }
 
 /** 
- * Find minimal unused thread id. Does this using scan of global list of thread
- * ids.
+ * Allocate new thread id, store it in global list of thread ids and return it. New
+ * thread id will be minimal unused thread id.
  * 
- * 
- * @return minimal unused thread id. 
+ * @return new thread id that is minimal unused thread id.
  */
 int uthread_new_id() {
+    /* \todo Rewrite this function, because for loop is wrong */
     thread_id_list_t *id_list;
     int new_id = 0;
     for(id_list=thread_id_list;id_list!=thread_id_list;id_list=id_list->next) {
@@ -162,37 +175,46 @@ void uthread_reset_alarm() {
  */
 void uthread_alarm_handler(int signum) {
     thread_t *prev = current;
+    if(signum == SIGTERM) {
+	uthread_reset_alarm();
+	siglongjmp(current->stack,1);
+    }
     if(sigsetjmp(current->stack,1)) {
 	uthread_reset_alarm();
 	return;
     }
+    /* \todo Following check for runnable threads is wrong, should be fixed */
     current = current->next;
     while(current != prev) {
 	if(current->state == THREAD_RUNNING)
 	    siglongjmp(current->stack,1);
 	current = current->next;
     }
-    /* TODO: No runnable threads. How to yield? */
     sched_yield();
+    uthread_reset_alarm();
 }
 
 /** 
  * This function checks if there is another thread that called uthread_join on
- * thread in question, and if there is then the return value of thread in
+ * thread in question, and if there is, then the return value of thread in
  * question is copied to supplied pointer to uthread_join call. After that wakes
- * up thread that was waiting and frees memory of thread that finished it's run.
+ * up thread that was waiting. If no thread waits, sets state of thread to
+ * THREAD_ZOMBIE and saves reurn value of the thread in retval member of it's
+ * structure.
  * 
  * @param thread thread that finished it's execution
  * @param retval return value of thread
  */
-void uthread_notify_exit(thread_t *thread, int retval) {
+int uthread_notify_exit(thread_t *thread, int retval) {
     if(thread->waiting_flag) {
 	if(thread->waiting_retval_ptr != NULL)
 	    *thread->waiting_retval_ptr = retval;
 	thread->waiting_thread->state = THREAD_RUNNING;
-	uthread_free(thread);
 	return;
     }
+    thread->retval = retval;
+    thread->state = THREAD_ZOMBIE;
+    return;
 }    
 
 /** 
@@ -260,6 +282,21 @@ thread_t *uthread_alloc() {
 }
 
 /** 
+ * Removes thread from global list of threads and free memory that was allocated
+ * to it.
+ * 
+ * @param thread thread to remove
+ */
+void uthread_free(thread_t *thread) {
+    thread->next->prev = thread->prev;
+    thread->prev->next = thread->next;
+    if(threads == thread)
+	threads = threads->next;
+    free(thread);
+    return;
+}
+
+/** 
  * This function is a wrapper to start new threads. It calls start_routine with
  * arg argument and after the execution finished, update thread_t structure
  * associated with thread. If no thread called uthread_join before start_routine
@@ -273,8 +310,8 @@ void uthread_spawn(thread_t *thread, UTHREAD_START_ROUTINE start_routine, void *
     int retval;
     retval = start_routine(arg);
     uthread_notify_exit(thread,retval);
-    thread->state = THREAD_ZOMBIE;
-    thread->retval = retval;
+    if(thread->state != THREAD_ZOMBIE)
+	free(thread);
     return;
 }
 
@@ -294,7 +331,6 @@ thread_t *uthread_find(thread_id tid) {
     return NULL;
 }
 
-
 thread_id uthread_create(UTHREAD_START_ROUTINE start_routine,void* arg) {
     thread_t *thread;
 
@@ -303,7 +339,6 @@ thread_id uthread_create(UTHREAD_START_ROUTINE start_routine,void* arg) {
 	    return UTHREAD_FAIL;
     }
     uthread_disable();
-
     thread = uthread_alloc();
 
     /* We save this point as new thread execution start. When we return here,
@@ -320,14 +355,11 @@ void uthread_exit(int retval) {
     thread_t *thread;
     uthread_disable();
     thread = current;
-    current->prev->next = current->next;
-    current->next->prev = current->prev;
-    current = current->prev;
+    current = current->next;
     uthread_notify_exit(thread, retval);
-    if(thread == threads)
-	threads = threads->next;
-    free(thread);
-    uthread_alarm_handler(SIGALRM);
+    if(thread->state != THREAD_ZOMBIE)
+	uthread_free(thread);
+    uthread_alarm_handler(SIGTERM);
 }
 
 thread_id uthread_self() {
@@ -336,11 +368,18 @@ thread_id uthread_self() {
 
 int uthread_join(thread_id th, int* thread_return) {
     thread_t *thread;
+    int retval;
     uthread_disable();
     thread = uthread_find(th);
     if(thread == NULL) {
 	uthread_enable();
 	return UTHREAD_INVALID;
+    }
+    if(thread->state == THREAD_ZOMBIE) {
+	retval = thread->retval;
+	uthread_free(thread);
+	uthread_enable();
+	return retval;
     }
     thread->waiting_flag = 1;
     thread->waiting_retval_ptr = thread_return;
@@ -353,15 +392,16 @@ int uthread_join(thread_id th, int* thread_return) {
 int uthread_cancel(thread_id th) {
     thread_t *thread;
     uthread_disable();
-    thread = current;
-    current->prev->next = current->next;
-    current->next->prev = current->prev;
-    current = current->prev;
+    if(current->id == th) {
+	uthread_exit(UTHREAD_CANCELLED);
+    }
+    thread = uthread_find(th);
+    if(thread == NULL)
+	return UTHREAD_INVALID;
     uthread_notify_exit(thread, UTHREAD_CANCELLED);
-    if(thread == threads)
-	threads = threads->next;
-    free(thread);
-    uthread_alarm_handler(SIGALRM);
+    if(thread->state != THREAD_ZOMBIE)
+	uthread_free(thread);
+    return UTHREAD_SUCCESS;
 }
 
 int uthread_yield() {
