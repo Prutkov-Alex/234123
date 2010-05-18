@@ -1,5 +1,6 @@
 #include "user_mutex.h"
 #include "queue.h"
+#include <signal.h>
 
 typedef enum{LOCKED,UNLOCKED}State;
 typedef unsigned int umutex_id;
@@ -17,7 +18,7 @@ typedef struct umutex_id_node{
 	struct umutex_id_node* prev;
 }umutex_id_list;
 
-umutex_id_list* initialized_mutexes;
+static umutex_id_list* initialized_mutexes;//TODO: init at global level
 
 #define FIND_MINIMAL(curr,min)			\
 	while(curr!=NULL)			\
@@ -64,7 +65,7 @@ int uthread_mutex_init(uthread_mutex_t* mutex)
 	new_mutex->owner_thread = NULL;
 
 	new_mutex_node = (umutex_id_node*)malloc(sizeof(umutex_id_node));
-	MUTEX_NULLRET(new_mutex_node);
+	if(new_mutex_node==NULL)return MUTEX_FAILURE;
 	new_mutex_node->mutex = new_mutex;
 	new_mutex_node->prev = curr->prev;
 	new_mutex_node->next = curr;
@@ -101,8 +102,8 @@ int uthread_mutex_lock(uthread_mutex_t* mutex)
 	if(mutex->state==LOCKED)
 	{
 		//TODO: Some kind of 'current' needed
-		if(queue_enqueue(mutex->wait_queue,current_thread)!=QUEUE_SUCCESS) return MUTEX_FAILURE;
-		current_thread->state = THREAD_SUSPENDED;
+		if(queue_enqueue(mutex->wait_queue,current)!=QUEUE_SUCCESS) return MUTEX_FAILURE;
+		current->state = THREAD_SUSPENDED;
 		return MUTEX_LOCKED;
 	}
 	mutex->state = LOCKED;

@@ -5,15 +5,16 @@
 #ifndef _QUEUE_H_
 #define _QUEUE_H_
 
-//#include "user_threads.h"
+#include "user_threads.h"
 #include <stdlib.h>
+
 
 #define QUEUE_SUCCESS (0)
 #define QUEUE_EMPTY   (-1)
 #define QUEUE_FAIL    (-2)
 
 
-typedef int* data_t;
+typedef thread_id data_t;
 
 
 typedef struct qnode{
