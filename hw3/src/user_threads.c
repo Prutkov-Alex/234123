@@ -9,14 +9,20 @@
  */
 #include <signal.h>
 #include <setjmp.h>
-#include <unistd.h>
 #include <sched.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdio.h>
 #include "user_threads.h"
 
 #define THREAD_RUNNING 0
 #define THREAD_SUSPENDED 1
 #define THREAD_ZOMBIE 2
+
+#define JMP_BUF_SP(env) (env[0].__jmpbuf[JB_SP])
+
+#define MILI2MICRO(ms) (ms*1000)
 
 typedef struct thread_struct_t thread_t;
 typedef struct thread_id_list_struct_t thread_id_list_t;
@@ -39,6 +45,8 @@ struct thread_struct_t {
     int retval;			/**< return value of this thread, stored if no
 				 * thread joined this thread before it exited */
 
+    UTHREAD_START_ROUTINE func;	/**< function which this thread executes */
+    void *arg;			/**< argument to pass to function of thread */
     thread_t *next;		/**< pointer to next thread in circular list of
 				 * all threads */
     thread_t *prev;		/**< pointer to previous thread in circular
@@ -80,7 +88,8 @@ int uthread_id_list_add(thread_id id) {
     if(new_id == NULL)
 	return UTHREAD_FAIL;
 
-    for(i=0; i<id; ++i) 
+    new_id->id = id;
+    for(i=0; i<id; ++i)
 	id_list = id_list->next;
     new_id->prev = id_list->prev;
     new_id->next = id_list;
@@ -121,14 +130,19 @@ int uthread_new_id() {
     /* \todo Rewrite this function, because for loop is wrong */
     thread_id_list_t *id_list;
     int new_id = 0;
-    for(id_list=thread_id_list;id_list!=thread_id_list;id_list=id_list->next) {
+    for(id_list=thread_id_list;id_list!=thread_id_list->prev;id_list=id_list->next) {
 	if(id_list->id != new_id) {
 	    uthread_id_list_add(new_id);
 	    return new_id;
 	}
 	new_id++;
     }
-    uthread_id_list_add(++new_id);
+    if(id_list->id != new_id) {
+	uthread_id_list_add(new_id);
+	return new_id;
+    }
+    ++new_id;
+    uthread_id_list_add(new_id);
     return new_id;
 }
 
@@ -139,7 +153,7 @@ int uthread_new_id() {
  * 
  */
 void uthread_disable() {
-    remaining_time = ualaram(0,0);
+    remaining_time = ualarm(0,0);
     return;
 }
 
@@ -152,7 +166,7 @@ void uthread_disable() {
 void uthread_enable() {
     if(!remaining_time)
 	remaining_time = 2;
-    ualaram(--remaining_time,0);
+    ualarm(--remaining_time,0);
     return;
 }
 
@@ -162,7 +176,7 @@ void uthread_enable() {
  * 
  */
 void uthread_reset_alarm() {
-    ualaram(TIME_SLICE,0);
+    ualarm(MILI2MICRO(TIME_SLICE),0);
 }
 
 /** 
@@ -190,6 +204,8 @@ void uthread_alarm_handler(int signum) {
 	    siglongjmp(current->stack,1);
 	current = current->next;
     }
+    if(current->state == THREAD_RUNNING)
+	siglongjmp(current->stack,1);
     sched_yield();
     uthread_reset_alarm();
 }
@@ -205,7 +221,7 @@ void uthread_alarm_handler(int signum) {
  * @param thread thread that finished it's execution
  * @param retval return value of thread
  */
-int uthread_notify_exit(thread_t *thread, int retval) {
+void uthread_notify_exit(thread_t *thread, int retval) {
     if(thread->waiting_flag) {
 	if(thread->waiting_retval_ptr != NULL)
 	    *thread->waiting_retval_ptr = retval;
@@ -237,6 +253,7 @@ int uthread_init() {
     }
     thread_id_list->id = 0;
     thread_id_list->next = thread_id_list;
+    thread_id_list->prev = thread_id_list;
     primary->id = 0;
     primary->state = THREAD_RUNNING;
     primary->waiting_flag = 0;
@@ -262,7 +279,7 @@ int uthread_init() {
  * 
  * @return pointer to new thread_t structure or NULL if allocation failed.
  */
-thread_t *uthread_alloc() {
+thread_t *uthread_alloc(UTHREAD_START_ROUTINE start_routine,void* arg) {
     thread_t *thread = malloc(sizeof(thread_t));
     if(thread == NULL)
 	return NULL;
@@ -271,6 +288,8 @@ thread_t *uthread_alloc() {
     thread->waiting_flag = 0;
     thread->waiting_thread = NULL;
     thread->waiting_retval_ptr = NULL;
+    thread->func = start_routine;
+    thread->arg = arg;
 
     /* Add new thread to the end of list, so that new thread will start
      * running after all existing threads */
@@ -292,6 +311,7 @@ void uthread_free(thread_t *thread) {
     thread->prev->next = thread->next;
     if(threads == thread)
 	threads = threads->next;
+    uthread_id_list_remove(thread->id);
     free(thread);
     return;
 }
@@ -306,12 +326,15 @@ void uthread_free(thread_t *thread) {
  * @param start_routine main function of new thread
  * @param arg argument to pass to start_routine when calling it
  */
-void uthread_spawn(thread_t *thread, UTHREAD_START_ROUTINE start_routine, void *arg) {
+void uthread_spawn(thread_t *thread) {
     int retval;
-    retval = start_routine(arg);
+    retval = thread->func(thread->arg);
+    uthread_disable();
     uthread_notify_exit(thread,retval);
     if(thread->state != THREAD_ZOMBIE)
-	free(thread);
+	uthread_free(thread);
+    current = current->next;
+    uthread_alarm_handler(SIGTERM);
     return;
 }
 
@@ -325,10 +348,16 @@ void uthread_spawn(thread_t *thread, UTHREAD_START_ROUTINE start_routine, void *
  */
 thread_t *uthread_find(thread_id tid) {
     thread_t *thread;
-    for(thread = threads; thread = thread->next ;thread != threads)
+    for(thread = threads->next; thread != threads ;thread = thread->next)
 	if(thread->id == tid)
 	    return thread;
+    if(thread->id == tid)
+	return thread;
     return NULL;
+}
+
+void *uthread_stack_alloc() {
+    return malloc(UTHREAD_DEF_STACK_SIZE);
 }
 
 thread_id uthread_create(UTHREAD_START_ROUTINE start_routine,void* arg) {
@@ -339,15 +368,18 @@ thread_id uthread_create(UTHREAD_START_ROUTINE start_routine,void* arg) {
 	    return UTHREAD_FAIL;
     }
     uthread_disable();
-    thread = uthread_alloc();
-
+    thread = uthread_alloc(start_routine,arg);
+    
     /* We save this point as new thread execution start. When we return here,
      * we spawn the thread and start it's execution. */
+    /* JMP_BUF_SP(thread->stack) = ((long)uthread_stack_alloc())+UTHREAD_DEF_STACK_SIZE; */
     if(sigsetjmp(thread->stack,1)) {
 	/* Execute this if we returned with siglongjmp. This will happen when
 	 * jumping from alarm handler. */
-	uthread_spawn(thread,start_routine,arg);
+	uthread_spawn(current);
     }
+    JMP_BUF_SP(thread->stack) = ((long)uthread_stack_alloc())+UTHREAD_DEF_STACK_SIZE;
+    uthread_enable();
     return thread->id;
 }
 
@@ -368,7 +400,6 @@ thread_id uthread_self() {
 
 int uthread_join(thread_id th, int* thread_return) {
     thread_t *thread;
-    int retval;
     uthread_disable();
     thread = uthread_find(th);
     if(thread == NULL) {
@@ -376,10 +407,10 @@ int uthread_join(thread_id th, int* thread_return) {
 	return UTHREAD_INVALID;
     }
     if(thread->state == THREAD_ZOMBIE) {
-	retval = thread->retval;
+	*thread_return = thread->retval;
 	uthread_free(thread);
 	uthread_enable();
-	return retval;
+	return UTHREAD_SUCCESS;
     }
     thread->waiting_flag = 1;
     thread->waiting_retval_ptr = thread_return;
@@ -407,4 +438,5 @@ int uthread_cancel(thread_id th) {
 int uthread_yield() {
     uthread_disable();
     uthread_alarm_handler(SIGALRM);
+    return UTHREAD_SUCCESS;
 }
