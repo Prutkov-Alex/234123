@@ -109,9 +109,11 @@ int uthread_id_list_add(thread_id id) {
  */
 int uthread_id_list_remove(thread_id id) {
     thread_id_list_t *current_id = thread_id_list->next;
-    while(current_id != thread_id_list)
+    while(current_id != thread_id_list) {
 	if(current_id->id == id)
 	    break;
+	current_id = current_id->next;
+    }
     if(current_id->id != id)
 	return UTHREAD_FAIL;
     current_id->next->prev = current_id->prev;
@@ -189,6 +191,7 @@ void uthread_reset_alarm() {
  */
 void uthread_alarm_handler(int signum) {
     thread_t *prev = current;
+    int alive = 0;
     if(signum == SIGTERM) {
 	uthread_reset_alarm();
 	siglongjmp(current->stack,1);
@@ -202,10 +205,14 @@ void uthread_alarm_handler(int signum) {
     while(current != prev) {
 	if(current->state == THREAD_RUNNING)
 	    siglongjmp(current->stack,1);
+	if(current->state == THREAD_SUSPENDED)
+	    alive++;
 	current = current->next;
     }
     if(current->state == THREAD_RUNNING)
 	siglongjmp(current->stack,1);
+    if(current->state != THREAD_SUSPENDED || !alive)
+	exit(prev->retval);
     sched_yield();
     uthread_reset_alarm();
 }
@@ -333,8 +340,7 @@ void uthread_spawn(thread_t *thread) {
     uthread_notify_exit(thread,retval);
     if(thread->state != THREAD_ZOMBIE)
 	uthread_free(thread);
-    current = current->next;
-    uthread_alarm_handler(SIGTERM);
+    uthread_alarm_handler(SIGALRM);
     return;
 }
 
@@ -387,11 +393,10 @@ void uthread_exit(int retval) {
     thread_t *thread;
     uthread_disable();
     thread = current;
-    current = current->next;
     uthread_notify_exit(thread, retval);
     if(thread->state != THREAD_ZOMBIE)
 	uthread_free(thread);
-    uthread_alarm_handler(SIGTERM);
+    uthread_alarm_handler(SIGALRM);
 }
 
 thread_id uthread_self() {
