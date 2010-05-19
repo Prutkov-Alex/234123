@@ -11,7 +11,7 @@ int uthread_open(const char* filename, int flags)
 
 int uthread_pipe(int filedes[2])
 {
-	return pipe(filedes);
+    return pipe2(filedes,O_NONBLOCK);
 }
 
 int uthread_read(int fd, void* buf, size_t count)
