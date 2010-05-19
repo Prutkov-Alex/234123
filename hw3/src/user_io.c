@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #include "user_io.h"
 
@@ -10,13 +11,13 @@ int uthread_open(const char* filename, int flags)
 
 int uthread_pipe(int filedes[2])
 {
-	return pipe(fieldes);
+	return pipe(filedes);
 }
 
 int uthread_read(int fd, void* buf, size_t count)
 {
 	int result;
-	while (result = read(fd, *buf, count) == -1) {
+	while (result = read(fd, buf, count) == -1) {
 		if(errno != EAGAIN) return -1;
 	}
 
@@ -26,7 +27,7 @@ int uthread_read(int fd, void* buf, size_t count)
 int uthread_write(int fd, const void* buf, size_t count)
 {
 	int result;
-	while (result = write(fd, *buf, count) == -1) {
+	while (result = write(fd, buf, count) == -1) {
 		if(errno != EAGAIN) return -1;
 	}
 
