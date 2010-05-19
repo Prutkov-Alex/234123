@@ -1,0 +1,23 @@
+CC = gcc
+
+CFLAGS = -Wall			 	\
+	 -Werror			\
+	 -g				\
+	 -O0				\
+	 -DNDEBUG
+
+LFLAGS = -L. -luthreads 
+
+.PHONY: all
+
+all: uthread_test
+
+uthread_test: uthread_test.c libuthreads.a
+	$(CC) -o test $(CFLAGS) $(LFLAGS) 1.c
+libuthreads.a:
+	make
+
+clean: 
+	rm -rf uthread_test
+doc:
+	doxygen Doxyfile; cd doc/latex; make;
