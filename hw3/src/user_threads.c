@@ -1,7 +1,7 @@
 /**
  * @file   user_threads.c
  * @author Dmitry Zbarski <dmitry.zbarski@gmail.com>
- * @date   Sun May 16 18:52:48 2010
+ * @date   Thu May 20 19:15:05 2010
  * 
  * @brief  Userspace threads implementation.
  * 
@@ -20,8 +20,19 @@
 #define THREAD_SUSPENDED 1
 #define THREAD_ZOMBIE 2
 
+/** 
+ * This macro is used to get access to saved SP pointer in sigjmp_buf
+ * structure. This is used to setup new stack when jumping with siglongjmp.
+ * 
+ * @param env sigjmp_buf structure whose SP to get
+ */
 #define JMP_BUF_SP(env) (env[0].__jmpbuf[JB_SP])
 
+/** 
+ * Macro converts milliseconds to microseconds.
+ * 
+ * @param ms number of milliseconds
+ */
 #define MILI2MICRO(ms) (ms*1000)
 
 typedef struct thread_struct_t thread_t;
