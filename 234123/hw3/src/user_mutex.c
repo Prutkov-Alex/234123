@@ -65,8 +65,8 @@ void uthread_alarm_handler(int);
 	if(curr==NULL)return MUTEX_UNINITIALIZED;			\
 
 
-#define DISABLE_SIGALRM signal(SIGALRM, SIG_IGN)
-#define ENABLE_SIGALRM  signal(SIGALRM, uthread_alarm_handler)
+#define DISABLE_SIGALRM(time) time = ualarm(0,0)
+#define ENABLE_SIGALRM(time)  ualarm(time,0)
 
 int uthread_mutex_init(uthread_mutex_t* mutex)
 {
@@ -92,7 +92,8 @@ int uthread_mutex_init(uthread_mutex_t* mutex)
 		ENABLE_SIGALRM;
 		return MUTEX_FAILURE;
 	}
-	new_mutex->owner_thread = NO_THREAD;
+	new_mutex->owner_th
+read = NO_THREAD;
 
 	new_mutex_node = (umutex_id_node*)malloc(sizeof(umutex_id_node));
 	if(new_mutex_node==NULL) 
